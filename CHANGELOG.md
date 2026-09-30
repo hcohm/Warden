@@ -3,7 +3,11 @@
 All notable changes to Warden are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
-## [1.1.0] - 2026-09-30
+Warden is in **alpha**: anything may still change between releases. The app itself reports the base version (for example `0.1.0`), because macOS version fields can't carry an `-alpha` suffix.
+
+> **Renumbered on 2026-09-30:** the first two releases were originally published as 1.0.0 and 1.1.0. They are now 0.1.0-alpha.1 and 0.1.0-alpha.2 to reflect that Warden is pre-release software. One commit message in the history still says "(1.1)"; it refers to 0.1.0-alpha.2.
+
+## [0.1.0-alpha.2] - 2026-09-30
 
 ### Added
 - **Network tab**: every app with open connections, with live download/upload rates or totals since the last reset. Data comes from `nettop`, which needs no root and sees every process.
@@ -28,7 +32,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Privacy
 - Reverse-DNS lookups are Warden's only network traffic. They go to the DNS server the Mac already uses and can be switched off in Settings.
 
-## [1.0.0] - 2026-09-30
+## [0.1.0-alpha.1] - 2026-09-30
 
 ### Added
 - Menu bar app with Live, Disk, Purge, Alerts and Settings tabs.
@@ -41,5 +45,5 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Start at login (asked on first run), single-instance guard, hardened runtime.
 - Universal (Apple Silicon + Intel) builds and a test suite.
 
-[1.1.0]: https://github.com/hcohm/Warden/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/hcohm/Warden/releases/tag/v1.0.0
+[0.1.0-alpha.2]: https://github.com/hcohm/Warden/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
+[0.1.0-alpha.1]: https://github.com/hcohm/Warden/tree/v0.1.0-alpha.1

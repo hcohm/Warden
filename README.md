@@ -1,5 +1,7 @@
 # Warden 👁
 
+> **Alpha software.** Warden is pre-release: expect rough edges, and features may change between versions. See [CHANGELOG.md](CHANGELOG.md).
+
 **A menu bar process monitor and killer for macOS that shows which processes are filling your disk, which files they write, and who they talk to on the network.**
 
 Warden sits in your menu bar as a small eye. Click it to see what's running, what's using CPU and memory, which processes are writing to disk and which files they're writing, which apps are connecting where, and how much space you have left. One button kills everything that isn't Apple's or on your whitelist. It warns you when something writes several gigabytes, uploads a lot, or when free space starts disappearing.
@@ -64,7 +66,7 @@ Quits any app that isn't on your whitelist as soon as it launches. It covers app
 
 ## Install
 
-1. Download a zip from [**Releases**](../../releases/latest):
+1. Download a zip from the newest release on the [**Releases**](../../releases) page:
    - `Warden-universal.zip`: runs on any Mac (recommended)
    - `Warden-arm64.zip`: Apple Silicon (M1 and later) only
    - `Warden-x86_64.zip`: Intel only
