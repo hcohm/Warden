@@ -169,6 +169,10 @@ This builds the real sources into a throwaway bundle and runs the full suite. It
    defaults delete local.warden.app
    ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 [MIT](LICENSE)
