@@ -7,6 +7,7 @@ enum Entry {
     static func main() {
         Keys.register()
         if CommandLine.arguments.contains("--dump") {  // dry run: what would a purge kill?
+            for p in Sampler.processes() { if let b = p.bundlePath { _ = Sampler.bundleInfo(b) } }  // verify all first
             for c in Killer.candidates(Sampler.processes(), whitelist: WLEntry.load(), guiApps: Killer.guiAppPids()) {
                 print("\(c.group.defaultOn ? "KILL" : "opt-in")\t\(c.proc.pid)\t\(Fmt.clean(c.proc.path))")
             }

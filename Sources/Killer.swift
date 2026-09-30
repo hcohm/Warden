@@ -46,7 +46,8 @@ enum Killer {
         func isProtected(_ pid: Int32, depth: Int = 0) -> Bool {
             if let c = protected[pid] { return c }
             guard pid > 1, depth < 64, let p = byPid[pid] else { return false }
-            let r = matches(p, whitelist) || p.pid == getpid() || isProtected(p.ppid, depth: depth + 1)
+            // Unverified signature = unknown identity: spare it (and its children) rather than guess.
+            let r = p.verifying || matches(p, whitelist) || p.pid == getpid() || isProtected(p.ppid, depth: depth + 1)
             protected[pid] = r
             return r
         }

@@ -3,7 +3,7 @@ import AppKit
 import Charts
 import ServiceManagement
 
-enum Tab: String, CaseIterable { case live = "Live", disk = "Disk", purge = "Purge", alerts = "Alerts", settings = "Settings" }
+enum Tab: String, CaseIterable { case live = "Live", disk = "Disk", net = "Network", purge = "Purge", alerts = "Alerts", settings = "Settings" }
 
 struct RootView: View {
     @EnvironmentObject var mon: Monitor
@@ -19,19 +19,27 @@ struct RootView: View {
             }
             .pickerStyle(.segmented).labelsHidden()
             Group {
+                if let pid = mon.selectedPid {
+                    ProcessDetailView(pid: pid)
+                } else {
                 switch tab {
                 case .live: LiveView()
                 case .disk: DiskView()
+                case .net: NetView()
                 case .purge: PurgeView()
                 case .alerts: AlertsView()
                 case .settings: SettingsView()
+                }
                 }
             }
             .frame(maxHeight: .infinity, alignment: .top)
         }
         .padding(12)
         .frame(width: 520, height: 620)
-        .onChange(of: tab) { _, t in if t == .alerts { mon.unseen = 0 } }
+        .onChange(of: tab) { _, t in
+            mon.selectedPid = nil
+            if t == .alerts { mon.unseen = 0 }
+        }
     }
 }
 
@@ -117,7 +125,7 @@ struct ProcRow: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(p.displayName).lineLimit(1)
                 Text("\(p.pid) · \(p.uid == 0 ? "root" : p.uid == getuid() ? "you" : "uid \(p.uid)")"
-                     + (Killer.matches(p, mon.whitelist) ? " · whitelisted" : ""))
+                     + (p.verifying ? " · verifying signature…" : Killer.matches(p, mon.whitelist) ? " · whitelisted" : ""))
                     .font(.caption2).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -129,6 +137,8 @@ struct ProcRow: View {
         }
         .font(.system(.callout).monospacedDigit())
         .help(p.path)
+        .contentShape(Rectangle())
+        .onTapGesture { mon.selectedPid = p.pid }
         .contextMenu { ProcMenu(p: p, systemKill: $systemKill) }
         .confirmationDialog("Kill system process “\(p.name)”?",
                             isPresented: Binding(get: { systemKill != nil }, set: { if !$0 { systemKill = nil } })) {
@@ -159,6 +169,7 @@ struct ProcMenu: View {
             let entry = WLEntry.from(p)
             Button("Whitelist “\(entry.label)”") { mon.whitelist.append(entry) }
         }
+        Button("Details…") { mon.selectedPid = p.pid }
         Button("Reveal in Finder") { NSWorkspace.shared.selectFile(p.bundlePath ?? p.path, inFileViewerRootedAtPath: "") }
         Button("Copy Path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(p.path, forType: .string) }
         if let w = p.written { Text("Written since start: \(Fmt.bytes(w))") }
@@ -235,6 +246,9 @@ struct DiskView: View {
                 }
                 Text("Counts bytes each process physically wrote. Deleted temp files still count — it tells you who churns the disk, not only who fills it.")
                     .font(.caption2).foregroundStyle(.secondary)
+
+                Divider()
+                WriteLandingView()
 
                 Divider()
                 Text("What's taking space").font(.subheadline.bold())
@@ -369,6 +383,11 @@ struct PurgeView: View {
             }
             .listStyle(.inset)
 
+            let verifying = mon.procs.filter(\.verifying).count
+            if verifying > 0 {
+                Text("\(verifying) processes are still having their signatures checked and are skipped until that finishes.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             Text("Whitelist — apps match by bundle ID + verified signer; children of whitelisted processes are spared too. Orange = loose rule.")
                 .font(.caption).foregroundStyle(.secondary)
             FlowTags(items: mon.whitelist) { e in mon.whitelist.removeAll { $0 == e } }
@@ -470,6 +489,9 @@ struct SettingsView: View {
     @AppStorage(Keys.dropAlertGB) private var dropGB = 5.0
     @AppStorage(Keys.lowFreeGB) private var lowGB = 15.0
     @AppStorage(Keys.enforce) private var enforce = false
+    @AppStorage(Keys.resolveHosts) private var resolveHosts = true
+    @AppStorage(Keys.uploadAlertGB) private var uploadGB = 1.0
+    @AppStorage(Keys.notifyNewDest) private var notifyNewDest = false
     @State private var loginOn = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
 
@@ -491,6 +513,15 @@ struct SettingsView: View {
                 if let loginError { Text(loginError).font(.caption).foregroundStyle(.red) }
                 Toggle("Enforce whitelist: quit any non-whitelisted app as soon as it launches", isOn: $enforce)
                 Text("Covers apps only, not background processes. Uses the same rules as Purge.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Network") {
+                Toggle("Show host names (reverse DNS lookups)", isOn: $resolveHosts)
+                Text("Asks your normal DNS server for the name behind each address. Off = raw IPs only, Warden sends nothing.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Stepper("Alert when an app uploads ≥ \(Int(uploadGB)) GB within \(Int(windowMin)) min", value: $uploadGB, in: 1...100)
+                Toggle("Notify when an app connects somewhere new", isOn: $notifyNewDest)
+                Text("New destinations always appear in the Network tab; this also sends a notification.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Permissions") {

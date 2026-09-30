@@ -1,14 +1,14 @@
 # Warden 👁
 
-**A menu bar process monitor and killer for macOS that also tells you which processes are filling your disk.**
+**A menu bar process monitor and killer for macOS that shows which processes are filling your disk, which files they write, and who they talk to on the network.**
 
-Warden sits in your menu bar as a small eye. Click it to see what's running, what's using CPU and memory, which processes are writing to disk and how much space you have left. One button kills everything that isn't Apple's or on your whitelist. It warns you when something writes several gigabytes, or when free space starts disappearing.
+Warden sits in your menu bar as a small eye. Click it to see what's running, what's using CPU and memory, which processes are writing to disk and which files they're writing, which apps are connecting where, and how much space you have left. One button kills everything that isn't Apple's or on your whitelist. It warns you when something writes several gigabytes, uploads a lot, or when free space starts disappearing.
 
-Think *Activity Monitor, simplified*, plus a bit of *Little Snitch* for local disk activity instead of network traffic. Everything happens on your Mac: no network access, no telemetry, no accounts.
+Think *Activity Monitor, simplified*, plus a monitor-only *Little Snitch* for disk and network activity. Everything happens on your Mac: no telemetry, no accounts. The only network traffic Warden causes is optional reverse-DNS lookups to show host names.
 
 - Native Swift/SwiftUI, a single ~1 MB app with no dependencies
 - Apple Silicon and Intel, macOS 14 Sonoma or later
-- Uses about 0.1% CPU while idle and samples every 2 seconds
+- Samples every 2 seconds and uses about 2% of one CPU core (measured while a game was hammering the disk)
 
 ---
 
@@ -17,12 +17,25 @@ Think *Activity Monitor, simplified*, plus a bit of *Little Snitch* for local di
 ### Live
 Every process on the system with CPU, memory and **current disk-write rate**. You can sort by any of them, filter by name, path or pid, or show only your own processes. Right-click a row to quit it, force-kill it, whitelist it, reveal it in Finder or copy its path. Killing a macOS system process asks for confirmation first.
 
+### Process details
+Click any process in Live or Network to see:
+- **Files open for writing right now**, with their sizes and how fast they're growing.
+- **Files written in the last 10 minutes**, with how much each grew.
+- **Network connections**, with remote host, port and bytes in and out.
+
 ### Disk
+- **Where writes are landing**: the folders that grew most in the last 10 minutes, with the processes writing there.
 - Free space, including purgeable space, with a 24-hour graph and 1h/24h change.
 - **Top writers**: the processes that wrote the most bytes since you last reset the list. It survives restarts. This is the answer to *"what the hell keeps eating my disk"*.
 - **Folder browser**: click through Home, `~/Library`, `/Applications`, `/Library`, `/private/var` or the whole disk to see what's big.
 - **Usual suspects**: one click sizes the usual culprits, such as Xcode DerivedData, simulators, Docker, OrbStack, Ollama, LM Studio, npm, cargo, Homebrew, iOS backups, caches, Downloads and Trash.
 - Shows local Time Machine snapshots that are holding space.
+
+### Network
+- Every app with open connections, with live download and upload rates, or total traffic since the last reset.
+- **New destinations**: a log of the first time each app talks to a new address, Little Snitch style. On first launch Warden learns what's already connected instead of flooding the log.
+- Host names via reverse DNS, which you can switch off in Settings to see raw IPs only.
+- **Monitoring only.** Warden can't block connections; see Roadmap.
 
 ### Purge
 Kills everything except:
@@ -39,6 +52,8 @@ You get a macOS notification, plus an entry in the Alerts tab and in `~/Library/
 | A single process writes a lot | ≥ 3 GB within 10 min |
 | Free space drops fast | ≥ 5 GB within 10 min (names the top recent writers) |
 | Disk is nearly full | < 15 GB free |
+| An app uploads a lot | ≥ 1 GB within 10 min |
+| An app connects somewhere new | off by default; the Network tab always lists it |
 
 All thresholds can be changed in Settings. The menu bar icon turns into a warning triangle while you have unseen alerts, and into a drive icon while the system is writing more than 100 MB/s.
 
@@ -115,7 +130,7 @@ Warden kills things, so it's built to be hard to misuse or trick:
 - **Hardened runtime.** Other processes can't inject code into Warden to borrow its Full Disk Access.
 - **No root component.** Warden runs as you. The only privileged action is a root kill that you confirmed, through the macOS password prompt.
 - **Clean logs.** Control characters in process names are stripped before they reach alerts or the log.
-- **No network access.** Warden never makes a network connection.
+- **Minimal network use.** Warden's only network traffic is reverse-DNS lookups for host names. They go to the DNS server your Mac already uses, and Settings can turn them off.
 
 ### Tests
 
@@ -123,12 +138,13 @@ Warden kills things, so it's built to be hard to misuse or trick:
 ./tests/run.sh
 ```
 
-This builds the real sources into a throwaway bundle and runs 26 checks. They cover identity and pid-reuse handling, rejection of look-alike apps, injection attempts against the root-kill script, whitelist parsing, system-path rules, log cleaning and hung-tool timeouts. The tests only spawn and kill their own dummy processes.
+This builds the real sources into a throwaway bundle and runs the full suite. It covers identity and pid-reuse handling, rejection of look-alike apps, signature-cache invalidation, injection attempts against the root-kill script, whitelist parsing, system-path rules, log cleaning, hung-tool timeouts, `nettop` parsing (IPv6, odd process names) and attribution of file writes to the process that made them. The tests only spawn and kill their own dummy processes.
 
 ---
 
 ## Limitations
 
+- **File attribution is best-effort.** Writes are credited to a process when it has the file open for writing while Warden looks, which reliably catches long-running writers. Brief open-write-close writes, and anything by root processes, show up in *Where writes are landing* by folder, but without a process name.
 - **No write stats for root processes.** macOS only reports per-process disk I/O for your own processes unless you're root. Warden still shows CPU and memory for root processes, and the free-space-drop alert catches what they write. A signed root helper is planned (see Roadmap).
 - **Very short-lived processes are missed.** A process that starts and exits between two 2-second samples doesn't appear in the per-process stats. The free-space-drop alert still catches its writes.
 - **Top writers counts bytes written, not space kept.** A process that writes and deletes temp files still ranks high. It shows who is wearing out your SSD, not only who is filling it.
@@ -139,6 +155,8 @@ This builds the real sources into a throwaway bundle and runs 26 checks. They co
 
 - [ ] Developer ID signing and notarization
 - [ ] Optional root helper, registered with `SMAppService` and signed, for per-process write stats of system daemons
+- [ ] Connection blocking and allow/deny rules via a Network Extension content filter (needs Apple's entitlement)
+- [ ] Exact per-file write attribution for every process via Endpoint Security (needs Apple's entitlement)
 - [ ] Per-process write history graphs
 
 ## Uninstall

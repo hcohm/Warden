@@ -25,7 +25,9 @@ check(pa.ppid == 1, "orphan reparented to launchd")
 // whitelist / candidates
 let wl = WLEntry.defaults()
 print("defaults:", wl.map { "\($0.label)[\($0.detail)]" })
+for p in Sampler.processes() { if let b = p.bundlePath { _ = Sampler.bundleInfo(b) } }  // finish signature checks
 let procs = Sampler.processes()
+check(!procs.contains { $0.verifying }, "no process left verifying after checks")
 let cands = Killer.candidates(procs, whitelist: wl, guiApps: Killer.guiAppPids())
 check(cands.contains { $0.proc.pid == a && $0.group == .background }, "orphan sleeper is a background candidate")
 let hasClaude = FileManager.default.fileExists(atPath: "/Applications/Claude.app")
@@ -45,6 +47,19 @@ if hasClaude {
 check(Killer.isSystem(Proc(pid: 5, ppid: 1, uid: 0, cpu: 0, rss: 0, start: "", path: "/usr/libexec/logd")), "/usr/libexec is system")
 check(!Killer.isSystem(Proc(pid: 5, ppid: 1, uid: 0, cpu: 0, rss: 0, start: "", path: "/usr/local/bin/foo")), "/usr/local is not system")
 check(!Killer.isSystem(Proc(pid: 5, ppid: 1, uid: 501, cpu: 0, rss: 0, start: "", path: "/Users/x/Dock")), "binary named Dock is not system")
+
+// signature cache must notice in-place edits (ctime changes even if mtime is forged)
+let fakeBundle = dir + "/Claude.app"
+_ = Sampler.bundleInfo(fakeBundle)
+_ = Sampler.run("/usr/libexec/PlistBuddy", ["-c", "Set :CFBundleIdentifier com.example.changed", fakeBundle + "/Contents/Info.plist"])
+_ = Sampler.run("/usr/bin/touch", ["-t", "200001010000", fakeBundle + "/Contents/Info.plist"])
+check(Sampler.bundleInfo(fakeBundle).0 == "com.example.changed", "bundle cache invalidated by in-place edit with forged mtime")
+
+// unverified processes are protected, and so are their children
+let unv = Proc(pid: 90001, ppid: 1, uid: getuid(), cpu: 0, rss: 0, start: "x", path: "/Applications/New.app/Contents/MacOS/New", verifying: true)
+let child = Proc(pid: 90002, ppid: 90001, uid: getuid(), cpu: 0, rss: 0, start: "x", path: "/opt/tool")
+let c2 = Killer.candidates([unv, child], whitelist: [], guiApps: [])
+check(c2.isEmpty, "verifying process and its child are not purge candidates")
 
 // parse
 check(WLEntry.parse("*node")?.kind == .substring, "parse *substring")
@@ -82,5 +97,52 @@ check(!Monitor.shared.alerts[0].title.contains("\n") && !Monitor.shared.alerts[0
 // timeout
 let t0 = Date(); _ = Sampler.run("/bin/sleep", ["30"], timeout: 1)
 check(Date().timeIntervalSince(t0) < 3, "run() watchdog kills hung tool")
+// nettop parsing
+let sample = """
+,bytes_in,bytes_out,
+apsd.506,17708,220559,
+tcp4 172.17.2.187:59207<->17.57.146.138:5223,17708,220559,
+tcp4 *:49251<->*:*,,,
+weird, name.777,10,20,
+tcp6 2001:db8::5.50000<->2606:4700::6810:84e5.443,5,6,
+udp4 *:*<->*:*,,,
+"""
+let parsed = NetSampler.parse(sample)
+check(parsed[506]?.bytesOut == 220559 && parsed[506]?.conns.count == 1, "nettop: process + v4 connection, listener skipped")
+check(parsed[506]?.conns.first?.remoteIP == "17.57.146.138" && parsed[506]?.conns.first?.remotePort == "5223", "nettop: v4 host/port")
+check(parsed[777]?.name == "weird, name" && parsed[777]?.bytesIn == 10, "nettop: comma in process name")
+check(parsed[777]?.conns.first?.remoteIP == "2606:4700::6810:84e5" && parsed[777]?.conns.first?.remotePort == "443", "nettop: v6 host/port")
+check(NetSampler.isLocal("192.168.1.4") && NetSampler.isLocal("fe80::1%en0") && !NetSampler.isLocal("17.57.146.138"), "local address detection")
+check(!NetSampler.sample().isEmpty, "live nettop sample returns processes")
+
+// file activity: open-for-write detection + FSEvents attribution
+let fsw = FSWatcher(ignore: [])
+fsw.start()
+Thread.sleep(forTimeInterval: 1)
+let target = String(cString: realpath(dir, nil)) + "/out.bin"  // kernel reports /private/var/...
+let wout = Sampler.run("/bin/sh", ["-c", "'\(dir)/writer' '\(target)' 6 >/dev/null 2>&1 & echo $!"])
+let wpid = Int32(wout.trimmingCharacters(in: .whitespacesAndNewlines))!
+var sawOpen = false
+var sizes: [Int64] = []
+for _ in 0..<4 {
+    Thread.sleep(forTimeInterval: 1)
+    let open = FDScan.writableFiles(wpid)
+    if let f = open.first(where: { $0.path == target && $0.size > 0 }) { sawOpen = true; sizes.append(f.size) }
+    fsw.setWriters(Dictionary(uniqueKeysWithValues: open.map { ($0.path, [wpid]) }))
+    fsw.observe(open.map { (wpid, $0.path, $0.size) })
+}
+if !sawOpen { print("  fds:", FDScan.writableFiles(wpid).map(\.path)) }
+check(sawOpen, "FDScan sees file open for writing: \(target)")
+Thread.sleep(forTimeInterval: 2)
+let snapDone = DispatchSemaphore(value: 0)
+var snap = FileSnapshot()
+fsw.snapshot { snap = $0; snapDone.signal() }
+while snapDone.wait(timeout: .now()) == .timedOut { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+let touch = snap.byPid[wpid]?.first { $0.path == target }
+let scanned = (sizes.last ?? 0) - (sizes.first ?? 0)
+check(scanned > 0 && (touch?.bytes ?? 0) >= scanned, "growth attributed to writer ≥ growth seen by scans (\(Fmt.bytes(scanned))): \(Fmt.bytes(touch?.bytes ?? 0))")
+check(snap.folders.contains { $0.folder == (target as NSString).deletingLastPathComponent && $0.pids.contains(wpid) }, "folder activity lists writer")
+Darwin.kill(wpid, SIGKILL)
+
 print(fails == 0 ? "ALL PASS" : "\(fails) FAILED")
 exit(fails == 0 ? 0 : 1)

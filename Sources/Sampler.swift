@@ -12,6 +12,8 @@ struct Proc: Identifiable {
     let path: String
     var bundleID: String? = nil
     var teamID: String? = nil  // only set when the signature is valid and Apple-issued
+    /// Signature check still running in the background. Treated as protected until done.
+    var verifying = false
     var written: UInt64?     // lifetime bytes written, nil = unknown (no permission)
     var writeRate: Double = 0
 
@@ -77,7 +79,7 @@ enum Sampler {
             var path = rest()
             if !path.hasPrefix("/"), uid == me, let full = pidPath(pid) { path = full }
             var p = Proc(pid: pid, ppid: ppid, uid: uid, cpu: cpu, rss: rss * 1024, start: start, path: path)
-            if let b = p.bundlePath { (p.bundleID, p.teamID) = bundleInfo(b) }
+            if let b = p.bundlePath { (p.bundleID, p.teamID, p.verifying) = bundleInfoAsync(b) }
             res.append(p)
         }
         return res
@@ -107,26 +109,66 @@ enum Sampler {
     // MARK: bundle identity
 
     private static let lock = NSLock()
-    private static var bundleCache: [String: (id: String?, team: String?, at: Date)] = [:]
+    private static var bundleCache: [String: (stamp: String, exe: String?, id: String?, team: String?)] = [:]
     private static let appleIssued: SecRequirement? = {
         var r: SecRequirement?
         SecRequirementCreateWithString("anchor apple generic" as CFString, [], &r)
         return r
     }()
 
+    /// Identity of the files the signature check depends on. ctime can't be set by a normal
+    /// user, so any in-place edit or replacement of the executable or Info.plist changes it.
+    private static func stamp(_ bundlePath: String, exe: String?) -> String {
+        [bundlePath + "/Contents/Info.plist", exe.map { bundlePath + "/Contents/MacOS/" + $0 }].compactMap { $0 }.map { p in
+            var st = stat()
+            guard stat(p, &st) == 0 else { return "-" }
+            return "\(st.st_ino):\(st.st_size):\(st.st_ctimespec.tv_sec).\(st.st_ctimespec.tv_nsec)"
+        }.joined(separator: "|")
+    }
+
     /// Bundle ID and signing team of an app bundle. Team is nil unless the signature is intact
-    /// and chains to Apple, so it can't be forged with a self-signed certificate.
+    /// and chains to Apple, so it can't be forged with a self-signed certificate. The (expensive)
+    /// signature check is redone only when the executable or Info.plist changes.
     static func bundleInfo(_ bundlePath: String) -> (String?, String?) {
-        lock.lock()
-        if let c = bundleCache[bundlePath], Date().timeIntervalSince(c.at) < 600 { lock.unlock(); return (c.id, c.team) }
-        lock.unlock()
+        if let c = cachedInfo(bundlePath) { return (c.id, c.team) }
         let plist = NSDictionary(contentsOfFile: bundlePath + "/Contents/Info.plist")
+        let exe = plist?["CFBundleExecutable"] as? String
+        let st = stamp(bundlePath, exe: exe)
         let id = plist?["CFBundleIdentifier"] as? String
         let team = teamID(bundlePath)
         lock.lock()
-        bundleCache[bundlePath] = (id, team, Date())
+        if bundleCache.count > 2000 { bundleCache.removeAll() }
+        bundleCache[bundlePath] = (st, exe, id, team)
         lock.unlock()
         return (id, team)
+    }
+
+    private static func cachedInfo(_ bundlePath: String) -> (id: String?, team: String?)? {
+        lock.lock()
+        let c = bundleCache[bundlePath]
+        lock.unlock()
+        guard let c, c.stamp == stamp(bundlePath, exe: c.exe) else { return nil }
+        return (c.id, c.team)
+    }
+
+    private static let verifyQueue = DispatchQueue(label: "warden.codesign", qos: .utility)
+    private static var verifyPending: Set<String> = []
+
+    /// Non-blocking variant for the 2 s sampling loop: hashing a multi-GB game binary can take
+    /// a minute on a busy disk. Returns verifying=true until the background check has finished.
+    static func bundleInfoAsync(_ bundlePath: String) -> (String?, String?, Bool) {
+        if let c = cachedInfo(bundlePath) { return (c.id, c.team, false) }
+        lock.lock()
+        let first = verifyPending.insert(bundlePath).inserted
+        lock.unlock()
+        if first {
+            verifyQueue.async {
+                _ = bundleInfo(bundlePath)
+                lock.lock(); verifyPending.remove(bundlePath); lock.unlock()
+            }
+        }
+        let id = NSDictionary(contentsOfFile: bundlePath + "/Contents/Info.plist")?["CFBundleIdentifier"] as? String
+        return (id, nil, true)
     }
 
     private static func teamID(_ path: String) -> String? {
@@ -188,6 +230,10 @@ enum Fmt {
     }
     static func signed(_ b: Int64) -> String {
         (b >= 0 ? "+" : "−") + bytes(abs(b))
+    }
+    static let home = FileManager.default.homeDirectoryForCurrentUser.path
+    static func path(_ p: String) -> String {
+        p.hasPrefix(home + "/") ? "~" + p.dropFirst(home.count) : p
     }
     /// File names can contain newlines and other control characters; never let them into logs.
     static func clean(_ s: String) -> String {
