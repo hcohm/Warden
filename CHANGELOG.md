@@ -7,7 +7,7 @@ Warden is in **alpha**: anything may still change between releases. The app itse
 
 > **Renumbered on 2026-09-30:** the first two releases were originally published as 1.0.0 and 1.1.0. They are now 0.1.0-alpha.1 and 0.1.0-alpha.2 to reflect that Warden is pre-release software. One commit message in the history still says "(1.1)"; it refers to 0.1.0-alpha.2.
 
-## [Unreleased]
+## [0.2.0-alpha.1] - 2026-10-02
 
 ### Added
 - **Flags** on processes worth a second look, shown as coloured chips in Purge and explained in the process detail view:
@@ -66,6 +66,6 @@ Warden is in **alpha**: anything may still change between releases. The app itse
 - Start at login (asked on first run), single-instance guard, hardened runtime.
 - Universal (Apple Silicon + Intel) builds and a test suite.
 
-[Unreleased]: https://github.com/hcohm/Warden/compare/v0.1.0-alpha.2...HEAD
+[0.2.0-alpha.1]: https://github.com/hcohm/Warden/compare/v0.1.0-alpha.2...v0.2.0-alpha.1
 [0.1.0-alpha.2]: https://github.com/hcohm/Warden/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/hcohm/Warden/tree/v0.1.0-alpha.1
