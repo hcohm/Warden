@@ -62,8 +62,12 @@ final class Monitor: ObservableObject {
     @Published var files = FileSnapshot()
     /// Privacy grants by TCC client; nil = TCC databases unreadable (no Full Disk Access).
     @Published var tccGrants: [String: Set<String>]?
-    /// Kill waiting for confirmation, shown as a card inside the popup.
-    @Published var killRequest: KillRequest?
+    /// Destructive action waiting for confirmation, shown as a card inside the popup.
+    @Published var confirm: ConfirmRequest?
+    /// Processes whose autostart Warden switched off, and those it kills on sight.
+    @Published var blocklist: [BlockEntry] = BlockEntry.load() {
+        didSet { BlockEntry.save(blocklist) }
+    }
     /// Process shown in the detail view, if any.
     @Published var selectedPid: Int32?
 
@@ -209,6 +213,7 @@ final class Monitor: ObservableObject {
             DispatchQueue.main.async {
                 self.sampling = false
                 self.procs = list
+                self.enforceBlocks(list)
                 self.cpuTotal = cpu
                 self.memUsed = mem
                 self.writeRateTotal = rateTotal
@@ -313,6 +318,60 @@ final class Monitor: ObservableObject {
             }
         }
         if newDests.count > 500 { newDests.removeLast(newDests.count - 500) }
+    }
+
+    // MARK: stop autostart / block
+
+    /// Switches off the launchd jobs behind `p`'s app (and its login item), kills it now, and
+    /// remembers it so it can be undone. With `killOnSight`, it's also killed whenever it reappears.
+    func stopAutostart(_ p: Proc, killOnSight: Bool) {
+        var entry = BlockEntry(rule: WLEntry.from(p), killOnSight: killOnSight)
+        let targets = procs.filter { entry.matches($0) && !Killer.isSystem($0) && !Killer.matches($0, whitelist) }
+        let jobs = Launchd.jobs()
+        var t = Set(targets.compactMap { jobs[$0.pid] })
+        if let id = p.bundleID, Launchd.validLabel(id) { t.insert("gui/\(getuid())/\(id)") }  // the app's own login item
+        entry.jobs = t.sorted()
+        if let err = Launchd.disable(entry.jobs) {
+            raise("Couldn't switch off all of \(entry.rule.label)'s launch jobs", err, notify: false)
+        }
+        if let i = blocklist.firstIndex(where: { $0.id == entry.id }) {
+            entry.jobs = Array(Set(entry.jobs + blocklist[i].jobs)).sorted()
+            entry.killOnSight = entry.killOnSight || blocklist[i].killOnSight
+            blocklist[i] = entry
+        } else {
+            blocklist.append(entry)
+        }
+        // bootout already stopped the jobs; kill whatever is still the same process instance.
+        let now = Sampler.identities(targets.map(\.pid))
+        let alive = targets.filter { t in now[t.pid].map { $0.start == t.start && $0.path == t.path } ?? false }
+        if !alive.isEmpty { Killer.kill(alive, force: true) }
+    }
+
+    func undoBlock(_ e: BlockEntry) {
+        blocklist.removeAll { $0.id == e.id }
+        if let err = Launchd.enable(e.jobs) { raise("Couldn't re-enable \(e.rule.label)", err, notify: false) }
+    }
+
+    /// Kill-on-sight, plus switching off any new launchd job found behind a blocked process.
+    private func enforceBlocks(_ procs: [Proc]) {
+        let hits = Killer.blocked(procs, blocklist, whitelist: whitelist)
+        guard !hits.isEmpty else { return }
+        let me = getuid()
+        let own = hits.filter { $0.uid == me }
+        // Find their launchd jobs before killing, while the pids still map to them.
+        let jobs = Launchd.jobs()
+        for p in own {
+            guard let job = jobs[p.pid], job.hasPrefix("gui/"),
+                  let i = blocklist.firstIndex(where: { $0.killOnSight && $0.matches(p) }), !blocklist[i].jobs.contains(job) else { continue }
+            Launchd.disable([job])
+            blocklist[i].jobs.append(job)
+        }
+        if !own.isEmpty { Killer.kill(own, force: true) }
+        for p in hits where cooledDown("block:" + p.path, 600) {
+            raise(p.uid == me ? "Stopped blocked \(p.displayName)" : "Blocked \(p.displayName) is running as root",
+                  p.uid == me ? p.path : "Warden won't ask for your password in the background; use Block on it again. \(p.path)",
+                  notify: false)
+        }
     }
 
     func topWritersRecent() -> [(String, UInt64)] {

@@ -148,6 +148,8 @@ struct ProcessDetailView: View {
                 if let p, !Killer.isSystem(p) {
                     if !Killer.matches(p, mon.whitelist) {
                         Button("Whitelist") { mon.whitelist.append(WLEntry.from(p)) }
+                        Button("Stop autostart") { mon.askStop(p, killOnSight: false) }
+                        Button("Block") { mon.askStop(p, killOnSight: true) }
                     }
                     Button("Quit") { Killer.kill([p], force: false) }
                     Button("Force Kill", role: .destructive) { Killer.kill([p], force: true) }

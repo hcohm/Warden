@@ -14,10 +14,11 @@ Warden is in **alpha**: anything may still change between releases. The app itse
   - suspicious: unsigned, executable deleted while running, runs from a temp/Downloads/cache/hidden folder;
   - bloat: a helper still running after its app was closed, updaters, idle for 3+ days;
   - permissions: root, listening on a network-facing port, and macOS privacy grants (Full Disk Access, Accessibility, Screen Recording, Input Monitoring, Camera, Microphone, …) read from the TCC databases.
+- **Stop autostart** and **Block** (⋯ menu in Purge, right-click in Live, buttons in process details). Stop autostart switches off an app's launchd jobs and login item for good (`launchctl disable` + `bootout`) and quits it; Block also kills it whenever it reappears and disables any new launchd job found behind it. Both are listed under *Stopped & blocked* and can be undone. Whitelisted and system processes can't be blocked; launchd labels are validated before reaching a shell.
 - Purge selection tools: **All**, **None**, **Flagged**, and **select by regex** against name and path.
 - Purge sorting by flags, name, memory, CPU or age, and a **Flagged only** filter.
 - `--dump` lists each candidate's flags.
-- Tests for selection, every flag rule, listener parsing and the TCC reader (50 checks in total).
+- Tests for selection, every flag rule, listener parsing, the TCC reader, launchd parsing, the block rule and a real disable/re-enable round trip on a throwaway launchd job (62 checks in total).
 
 ### Changed
 - **Nothing in Purge is ticked by default.** Previously apps and background processes started ticked.

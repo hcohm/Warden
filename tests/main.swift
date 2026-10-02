@@ -200,5 +200,36 @@ var tp = Proc(pid: 9, ppid: 1, uid: 501, cpu: 0, rss: 0, start: "", path: fake +
 tp.bundleID = "com.example.fakeapp"
 check(Flags.of(tp, Flags.Context(procs: [], net: [:], grants: g)).contains { $0.label == "Accessibility" && $0.kind == .permission }, "flag: privacy grant shown")
 
+// launchd: parsing
+let lst = Launchd.parseList("PID\tStatus\tLabel\n23861\t15\tai.perplexity.perplexityd\n23866\t0\tapplication.ai.perplexity.macv3.1.2\n-\t0\tcom.example.idle\n77\t0\tbad;label\n", domain: "gui/501")
+check(lst == [23861: "gui/501/ai.perplexity.perplexityd"], "launchctl list: running jobs only, app instances and bad labels skipped")
+let sys = Launchd.parsePrintSystem("system = {\n\tservices = {\n\t\t     782      - \tcom.crystalidea.macsfancontrol.smcwrite\n\t\t       0      - \tcom.apple.rpmuxd\n\t}\n}\n")
+check(sys == [782: "system/com.crystalidea.macsfancontrol.smcwrite"], "launchctl print system: running daemons only")
+check(!Launchd.validLabel("x; rm -rf ~") && !Launchd.validLabel("a b") && Launchd.validLabel("com.example.Some-App_2"), "labels with shell characters rejected")
+
+// block rule: kill-on-sight only, never whitelisted or system
+var bApp = Proc(pid: 50, ppid: 1, uid: 501, cpu: 0, rss: 0, start: "", path: "/Applications/Perplexity.app/Contents/Library/LaunchAgents/Perplexity Helper.app/Contents/MacOS/perplexityd")
+bApp.bundleID = "ai.perplexity.macv3"
+let rule = WLEntry(kind: .app, value: "ai.perplexity.macv3", team: "TEAM", label: "Perplexity")
+let sysP = Proc(pid: 51, ppid: 1, uid: 0, cpu: 0, rss: 0, start: "", path: "/usr/libexec/logd")
+check(Killer.blocked([bApp], [BlockEntry(rule: rule, killOnSight: true)], whitelist: []).map(\.pid) == [50], "blocked: matches whole app by bundle ID, team ignored")
+check(Killer.blocked([bApp], [BlockEntry(rule: rule, killOnSight: false)], whitelist: []).isEmpty, "stop-autostart entry doesn't kill on sight")
+check(Killer.blocked([bApp], [BlockEntry(rule: rule, killOnSight: true)], whitelist: [WLEntry(kind: .path, value: "/Applications/Perplexity.app/", label: "p")]).isEmpty, "whitelist beats block list")
+check(Killer.blocked([sysP], [BlockEntry(rule: WLEntry(kind: .path, value: "/usr/", label: "u"), killOnSight: true)], whitelist: []).isEmpty, "system processes can't be blocked")
+
+// launchd end to end with a throwaway job
+let label = "local.warden.selftest"
+let jobTarget = "gui/\(getuid())/\(label)"
+_ = Sampler.run("/bin/launchctl", ["submit", "-l", label, "--", fdir + "/fake/sleeper", "300"])
+Thread.sleep(forTimeInterval: 1)
+let jpid = Launchd.jobs().first { $0.value == jobTarget }?.key
+check(jpid != nil, "job found behind its process")
+check(Launchd.disable([jobTarget]) == nil, "disable + bootout")
+Thread.sleep(forTimeInterval: 2)
+check(!Launchd.jobs().values.contains(jobTarget) && jpid.map { Darwin.kill($0, 0) != 0 } == true, "job gone and process stopped")
+check(Sampler.run("/bin/launchctl", ["print-disabled", "gui/\(getuid())"]).contains("\"\(label)\" => disabled"), "disabled state stored by launchd")
+Launchd.enable([jobTarget])
+check(Sampler.run("/bin/launchctl", ["print-disabled", "gui/\(getuid())"]).contains("\"\(label)\" => enabled"), "undo re-enables")
+
 print(fails == 0 ? "ALL PASS" : "\(fails) FAILED")
 exit(fails == 0 ? 0 : 1)

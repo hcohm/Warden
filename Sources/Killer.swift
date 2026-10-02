@@ -25,6 +25,14 @@ enum Killer {
         case unidentified = "Unidentified path"
     }
 
+    /// Running processes that a kill-on-sight block entry covers. System and whitelisted
+    /// processes are never touched, whatever the block list says.
+    static func blocked(_ procs: [Proc], _ entries: [BlockEntry], whitelist: [WLEntry]) -> [Proc] {
+        let active = entries.filter(\.killOnSight)
+        guard !active.isEmpty else { return [] }
+        return procs.filter { p in !isSystem(p) && !matches(p, whitelist) && active.contains { $0.matches(p) } }
+    }
+
     /// Keys of candidates whose name or path matches `pattern` (case-insensitive; ^ and $ work
     /// per line, so "^/Applications/" anchors to the path); nil if the pattern is invalid.
     static func select(_ pattern: String, in cands: [Candidate]) -> Set<String>? {

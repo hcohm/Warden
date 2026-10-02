@@ -51,6 +51,14 @@ Candidates are grouped into **Apps**, **Background** processes and **Root / othe
 
 Killing root processes asks for your password through the standard macOS prompt.
 
+### Stop autostart and Block
+Killing isn't enough for apps that come straight back. Many register a launchd agent, the way Perplexity's `perplexityd` does, so macOS restarts them, and helpers and apps often relaunch each other. Use the **⋯** menu on a Purge row, the right-click menu in Live, or the buttons in a process's details:
+
+- **Stop autostart:** switches off the app's launchd jobs and its login item (`launchctl disable` + `bootout`, which persists across reboots) and quits it now. You can still open it yourself.
+- **Block:** the same, and Warden also kills it **whenever it shows up**, however it was started. It also switches off any new launchd job it finds behind it.
+
+A block covers the whole app, helpers included. Whitelisted and macOS system processes can never be blocked. Root daemons are switched off through the admin password prompt; Warden never asks for your password in the background. Everything is listed under **Stopped & blocked** in Purge, and × undoes it by re-enabling the jobs (they start again at next login or when you open the app).
+
 ### Flags
 Warden marks processes worth a second look. Hover a flag for the reason, or open the process for the full explanation. They're heuristics, not verdicts.
 

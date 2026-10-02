@@ -36,7 +36,7 @@ struct RootView: View {
         }
         .padding(12)
         .frame(width: 520, height: 620)
-        .overlay { if let r = mon.killRequest { KillConfirm(r: r) } }
+        .overlay { if let r = mon.confirm { ConfirmCard(r: r) } }
         .onChange(of: tab) { _, t in
             mon.selectedPid = nil
             if t == .alerts { mon.unseen = 0 }
@@ -158,6 +158,8 @@ struct ProcMenu: View {
         if !Killer.isSystem(p) && !Killer.matches(p, mon.whitelist) {
             let entry = WLEntry.from(p)
             Button("Whitelist “\(entry.label)”") { mon.whitelist.append(entry) }
+            Button("Stop “\(entry.label)” starting by itself…") { mon.askStop(p, killOnSight: false) }
+            Button("Block “\(entry.label)”…") { mon.askStop(p, killOnSight: true) }
         }
         Button("Details…") { mon.selectedPid = p.pid }
         Button("Reveal in Finder") { NSWorkspace.shared.selectFile(p.bundlePath ?? p.path, inFileViewerRootedAtPath: "") }
@@ -166,40 +168,56 @@ struct ProcMenu: View {
     }
 
     func confirmSystem(force: Bool) {
-        mon.killRequest = KillRequest(
+        mon.confirm = ConfirmRequest(
             title: "Kill system process “\(p.name)”?",
             message: "This is part of macOS. launchd will usually restart it, and some (loginwindow, WindowServer) end your session immediately.",
-            procs: [p], force: force)
+            button: force ? "Force Kill" : "Terminate",
+            action: { Killer.kill([p], force: force) })
     }
 }
 
-/// Kill confirmation. Lives inside the popup: system dialogs attached to a menu bar
-/// window never become active, so their buttons can't be clicked.
-struct KillRequest {
+/// Confirmation for destructive actions. Lives inside the popup: system dialogs attached to
+/// a menu bar window never become active, so their buttons can't be clicked.
+struct ConfirmRequest {
     let title: String
     let message: String
-    let procs: [Proc]
-    let force: Bool
-    var then: () -> Void = {}
+    let button: String
+    let action: () -> Void
 }
 
-struct KillConfirm: View {
+extension Monitor {
+    /// Asks before switching off autostart (and, with killOnSight, blocking) `p`'s app or binary.
+    func askStop(_ p: Proc, killOnSight: Bool) {
+        let name = WLEntry.from(p).label
+        let root = procs.contains { $0.uid != getuid() && BlockEntry(rule: WLEntry.from(p)).matches($0) }
+        confirm = ConfirmRequest(
+            title: killOnSight ? "Block \(name)?" : "Stop \(name) starting by itself?",
+            message: (killOnSight
+                ? "Warden switches off \(name)'s launch jobs and login item, quits it now, and from now on kills it whenever it starts."
+                : "Warden switches off \(name)'s launch jobs and login item so it won't start by itself, and quits it now. You can still open it yourself.")
+                + (root ? " Part of it runs as root, so you'll be asked for your password." : "")
+                + "\n\nUndo any time under Purge › Stopped & blocked.",
+            button: killOnSight ? "Block" : "Stop autostart",
+            action: { self.stopAutostart(p, killOnSight: killOnSight) })
+    }
+}
+
+struct ConfirmCard: View {
     @EnvironmentObject var mon: Monitor
-    let r: KillRequest
+    let r: ConfirmRequest
     var body: some View {
         ZStack {
-            Color.black.opacity(0.3).onTapGesture { mon.killRequest = nil }
+            Color.black.opacity(0.3).onTapGesture { mon.confirm = nil }
             VStack(alignment: .leading, spacing: 10) {
                 Text(r.title).font(.headline)
                 ScrollView { Text(r.message).frame(maxWidth: .infinity, alignment: .leading) }
                     .frame(maxHeight: 220).fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Spacer()
-                    Button("Cancel") { mon.killRequest = nil }.keyboardShortcut(.cancelAction)
-                    Button(r.force ? "Force Kill" : "Kill", role: .destructive) {
-                        mon.killRequest = nil
-                        Killer.kill(r.procs, force: r.force)
-                        r.then()
+                    Button("Cancel") { mon.confirm = nil }.keyboardShortcut(.cancelAction)
+                    Button(r.button, role: .destructive) {
+                        mon.confirm = nil
+                        r.action()
                     }
                     .buttonStyle(.borderedProminent).tint(.red).keyboardShortcut(.defaultAction)
                 }
@@ -208,6 +226,34 @@ struct KillConfirm: View {
             .frame(width: 380)
             .background(RoundedRectangle(cornerRadius: 12).fill(.regularMaterial))
             .shadow(radius: 12)
+        }
+    }
+}
+
+/// Undo list for Stop autostart / Block.
+struct BlockTags: View {
+    @EnvironmentObject var mon: Monitor
+    var body: some View {
+        if !mon.blocklist.isEmpty {
+            HStack(spacing: 4) {
+                Text("Stopped & blocked:").font(.caption).foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(mon.blocklist) { e in
+                            HStack(spacing: 3) {
+                                Image(systemName: e.killOnSight ? "nosign" : "power.dotted")
+                                Text(e.rule.label)
+                                Button { mon.undoBlock(e) } label: { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.borderless).help("Undo: re-enable its launch jobs" + (e.killOnSight ? " and stop killing it" : ""))
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(Capsule().fill(Color.red.opacity(e.killOnSight ? 0.2 : 0.1)))
+                            .help(e.killOnSight ? "Blocked: killed whenever it starts" : "Autostart stopped" + (e.jobs.isEmpty ? "" : " · " + e.jobs.joined(separator: ", ")))
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -392,11 +438,14 @@ struct PurgeView: View {
                 Button(role: .destructive) {
                     // The list is frozen here; exactly these get killed.
                     let root = selected.filter { $0.uid != getuid() }.count
-                    mon.killRequest = KillRequest(
+                    let f = force
+                    mon.confirm = ConfirmRequest(
                         title: "Kill \(selected.count) process\(selected.count == 1 ? "" : "es")?",
                         message: selected.map(\.displayName).joined(separator: "\n")
-                            + (root > 0 ? "\n\n\(root) run as root — you'll be asked for your password." : ""),
-                        procs: selected, force: force, then: { checked = [] })
+                            + (root > 0 ? "\n\n\(root) run as root — you'll be asked for your password." : "")
+                            + "\n\nThings that restart themselves need Stop autostart or Block (⋯ menu).",
+                        button: f ? "Force Kill" : "Kill",
+                        action: { Killer.kill(selected, force: f); checked = [] })
                 } label: {
                     Label("Kill \(selected.count)", systemImage: "bolt.fill")
                 }
@@ -440,8 +489,14 @@ struct PurgeView: View {
                                     FlagChips(flags: fl)
                                     Spacer()
                                     Text(Fmt.bytes(c.proc.rss)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                                    Button("Whitelist") { mon.whitelist.append(WLEntry.from(c.proc)) }
-                                        .controlSize(.small)
+                                    Menu {
+                                        Button("Whitelist") { mon.whitelist.append(WLEntry.from(c.proc)) }
+                                        Button("Stop autostart…") { mon.askStop(c.proc, killOnSight: false) }
+                                        Button("Block…") { mon.askStop(c.proc, killOnSight: true) }
+                                        Divider()
+                                        Button("Details") { mon.selectedPid = c.proc.pid }
+                                    } label: { Image(systemName: "ellipsis.circle") }
+                                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                                 }
                                 .contentShape(Rectangle())
                                 .onTapGesture(count: 2) { mon.selectedPid = c.proc.pid }
@@ -461,6 +516,7 @@ struct PurgeView: View {
             Text("Whitelist — apps match by bundle ID + verified signer; children of whitelisted processes are spared too. Orange = loose rule.")
                 .font(.caption).foregroundStyle(.secondary)
             FlowTags(items: mon.whitelist) { e in mon.whitelist.removeAll { $0 == e } }
+            BlockTags()
             HStack {
                 TextField("App name, bundle ID, /exact/path, /prefix/ or *substring", text: $newEntry)
                     .textFieldStyle(.roundedBorder)
