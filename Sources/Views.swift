@@ -36,6 +36,7 @@ struct RootView: View {
         }
         .padding(12)
         .frame(width: 520, height: 620)
+        .overlay { if let r = mon.killRequest { KillConfirm(r: r) } }
         .onChange(of: tab) { _, t in
             mon.selectedPid = nil
             if t == .alerts { mon.unseen = 0 }
@@ -118,7 +119,6 @@ struct LiveView: View {
 struct ProcRow: View {
     @EnvironmentObject var mon: Monitor
     let p: Proc
-    @State private var systemKill: Bool?  // force flag while the system-process warning is up
     var body: some View {
         HStack(spacing: 6) {
             AppIcon(path: p.bundlePath ?? p.path)
@@ -139,27 +139,17 @@ struct ProcRow: View {
         .help(p.path)
         .contentShape(Rectangle())
         .onTapGesture { mon.selectedPid = p.pid }
-        .contextMenu { ProcMenu(p: p, systemKill: $systemKill) }
-        .confirmationDialog("Kill system process “\(p.name)”?",
-                            isPresented: Binding(get: { systemKill != nil }, set: { if !$0 { systemKill = nil } })) {
-            Button(systemKill == true ? "Force Kill" : "Terminate", role: .destructive) {
-                Killer.kill([p], force: systemKill == true)
-                systemKill = nil
-            }
-        } message: {
-            Text("This is part of macOS. launchd will usually restart it, and some (loginwindow, WindowServer) end your session immediately.")
-        }
+        .contextMenu { ProcMenu(p: p) }
     }
 }
 
 struct ProcMenu: View {
     @EnvironmentObject var mon: Monitor
     let p: Proc
-    @Binding var systemKill: Bool?
     var body: some View {
         if Killer.isSystem(p) {
-            Button("Terminate…") { systemKill = false }
-            Button("Force Kill…") { systemKill = true }
+            Button("Terminate…") { confirmSystem(force: false) }
+            Button("Force Kill…") { confirmSystem(force: true) }
         } else {
             Button("Quit / Terminate") { Killer.kill([p], force: false) }
             Button("Force Kill") { Killer.kill([p], force: true) }
@@ -173,6 +163,52 @@ struct ProcMenu: View {
         Button("Reveal in Finder") { NSWorkspace.shared.selectFile(p.bundlePath ?? p.path, inFileViewerRootedAtPath: "") }
         Button("Copy Path") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(p.path, forType: .string) }
         if let w = p.written { Text("Written since start: \(Fmt.bytes(w))") }
+    }
+
+    func confirmSystem(force: Bool) {
+        mon.killRequest = KillRequest(
+            title: "Kill system process “\(p.name)”?",
+            message: "This is part of macOS. launchd will usually restart it, and some (loginwindow, WindowServer) end your session immediately.",
+            procs: [p], force: force)
+    }
+}
+
+/// Kill confirmation. Lives inside the popup: system dialogs attached to a menu bar
+/// window never become active, so their buttons can't be clicked.
+struct KillRequest {
+    let title: String
+    let message: String
+    let procs: [Proc]
+    let force: Bool
+    var then: () -> Void = {}
+}
+
+struct KillConfirm: View {
+    @EnvironmentObject var mon: Monitor
+    let r: KillRequest
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.3).onTapGesture { mon.killRequest = nil }
+            VStack(alignment: .leading, spacing: 10) {
+                Text(r.title).font(.headline)
+                ScrollView { Text(r.message).frame(maxWidth: .infinity, alignment: .leading) }
+                    .frame(maxHeight: 220).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { mon.killRequest = nil }.keyboardShortcut(.cancelAction)
+                    Button(r.force ? "Force Kill" : "Kill", role: .destructive) {
+                        mon.killRequest = nil
+                        Killer.kill(r.procs, force: r.force)
+                        r.then()
+                    }
+                    .buttonStyle(.borderedProminent).tint(.red).keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(16)
+            .frame(width: 380)
+            .background(RoundedRectangle(cornerRadius: 12).fill(.regularMaterial))
+            .shadow(radius: 12)
+        }
     }
 }
 
@@ -334,7 +370,6 @@ struct PurgeView: View {
     @AppStorage("flaggedOnly") private var flaggedOnly = false
     @State private var newEntry = ""
     @State private var addError: String?
-    @State private var pending: [Proc] = []        // frozen when the dialog opens; exactly this gets killed
 
     var body: some View {
         let ctx = Flags.Context(procs: mon.procs, net: mon.net, grants: mon.tccGrants)
@@ -354,22 +389,18 @@ struct PurgeView: View {
             HStack {
                 Toggle("Force (no save prompts)", isOn: $force).toggleStyle(.checkbox)
                 Spacer()
-                Button(role: .destructive) { pending = selected } label: {
+                Button(role: .destructive) {
+                    // The list is frozen here; exactly these get killed.
+                    let root = selected.filter { $0.uid != getuid() }.count
+                    mon.killRequest = KillRequest(
+                        title: "Kill \(selected.count) process\(selected.count == 1 ? "" : "es")?",
+                        message: selected.map(\.displayName).joined(separator: "\n")
+                            + (root > 0 ? "\n\n\(root) run as root — you'll be asked for your password." : ""),
+                        procs: selected, force: force, then: { checked = [] })
+                } label: {
                     Label("Kill \(selected.count)", systemImage: "bolt.fill")
                 }
                 .buttonStyle(.borderedProminent).tint(.red).disabled(selected.isEmpty)
-            }
-            .confirmationDialog("Kill \(pending.count) processes?",
-                                isPresented: Binding(get: { !pending.isEmpty }, set: { if !$0 { pending = [] } })) {
-                Button(force ? "Force Kill" : "Kill", role: .destructive) {
-                    Killer.kill(pending, force: force)
-                    pending = []
-                    checked = []
-                }
-            } message: {
-                let root = pending.filter { $0.uid != getuid() }.count
-                Text(pending.map(\.displayName).joined(separator: ", ")
-                     + (root > 0 ? "\n\n\(root) run as root — you'll be asked for your password." : ""))
             }
             HStack(spacing: 6) {
                 Button("All") { checked.formUnion(visible.map(\.0.id)) }
@@ -423,7 +454,8 @@ struct PurgeView: View {
 
             let verifying = mon.procs.filter(\.verifying).count
             if verifying > 0 {
-                Text("\(verifying) processes are still having their signatures checked and are skipped until that finishes.")
+                Text(verifying == 1 ? "1 process is still having its signature checked and is skipped until that finishes."
+                     : "\(verifying) processes are still having their signatures checked and are skipped until that finishes.")
                     .font(.caption).foregroundStyle(.orange)
             }
             Text("Whitelist — apps match by bundle ID + verified signer; children of whitelisted processes are spared too. Orange = loose rule.")

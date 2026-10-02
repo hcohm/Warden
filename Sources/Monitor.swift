@@ -62,6 +62,8 @@ final class Monitor: ObservableObject {
     @Published var files = FileSnapshot()
     /// Privacy grants by TCC client; nil = TCC databases unreadable (no Full Disk Access).
     @Published var tccGrants: [String: Set<String>]?
+    /// Kill waiting for confirmation, shown as a card inside the popup.
+    @Published var killRequest: KillRequest?
     /// Process shown in the detail view, if any.
     @Published var selectedPid: Int32?
 

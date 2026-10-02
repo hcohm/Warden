@@ -24,6 +24,7 @@ Warden is in **alpha**: anything may still change between releases. The app itse
 - Standalone executables (not only app bundles) now get their signature checked, in the background and cached the same way. Like bundles, they're protected from Purge until the check finishes.
 
 ### Fixed
+- **Kill confirmations didn't work.** The Purge confirmation (and the one for killing a macOS system process from Live) opened as a system dialog that never became active inside the menu bar popup: its button stayed grey and clicking it just hid the popup. Confirmations are now a card inside the popup.
 - Regex `^` and `$` match per line, so a pattern can anchor to the path as well as the name.
 
 ## [0.1.0-alpha.2] - 2026-09-30
