@@ -14,6 +14,9 @@ struct Proc: Identifiable {
     var teamID: String? = nil  // only set when the signature is valid and Apple-issued
     /// Signature check still running in the background. Treated as protected until done.
     var verifying = false
+    /// Valid signature from an Apple-issued certificate; nil = not checked (system binary or pending).
+    var signed: Bool? = nil
+    var exeMissing = false
     var written: UInt64?     // lifetime bytes written, nil = unknown (no permission)
     var writeRate: Double = 0
 
@@ -79,7 +82,14 @@ enum Sampler {
             var path = rest()
             if !path.hasPrefix("/"), uid == me, let full = pidPath(pid) { path = full }
             var p = Proc(pid: pid, ppid: ppid, uid: uid, cpu: cpu, rss: rss * 1024, start: start, path: path)
-            if let b = p.bundlePath { (p.bundleID, p.teamID, p.verifying) = bundleInfoAsync(b) }
+            if let b = p.bundlePath {
+                (p.bundleID, p.teamID, p.verifying) = bundleInfoAsync(b)
+                p.signed = p.verifying ? nil : signed(b)
+            } else if path.hasPrefix("/"), !Killer.isSystem(p) {
+                (_, _, p.verifying) = bundleInfoAsync(path)  // plain executable: signature only
+                p.signed = p.verifying ? nil : signed(path)
+            }
+            if path.hasPrefix("/"), !Killer.isSystem(p) { p.exeMissing = access(path, F_OK) != 0 }
             res.append(p)
         }
         return res
@@ -109,7 +119,7 @@ enum Sampler {
     // MARK: bundle identity
 
     private static let lock = NSLock()
-    private static var bundleCache: [String: (stamp: String, exe: String?, id: String?, team: String?)] = [:]
+    private static var bundleCache: [String: (stamp: String, exe: String?, id: String?, team: String?, signed: Bool)] = [:]
     private static let appleIssued: SecRequirement? = {
         var r: SecRequirement?
         SecRequirementCreateWithString("anchor apple generic" as CFString, [], &r)
@@ -118,8 +128,12 @@ enum Sampler {
 
     /// Identity of the files the signature check depends on. ctime can't be set by a normal
     /// user, so any in-place edit or replacement of the executable or Info.plist changes it.
+    /// A path that isn't an .app bundle is stamped as a single executable file.
     private static func stamp(_ bundlePath: String, exe: String?) -> String {
-        [bundlePath + "/Contents/Info.plist", exe.map { bundlePath + "/Contents/MacOS/" + $0 }].compactMap { $0 }.map { p in
+        let files = bundlePath.hasSuffix(".app")
+            ? [bundlePath + "/Contents/Info.plist", exe.map { bundlePath + "/Contents/MacOS/" + $0 }].compactMap { $0 }
+            : [bundlePath]
+        return files.map { p in
             var st = stat()
             guard stat(p, &st) == 0 else { return "-" }
             return "\(st.st_ino):\(st.st_size):\(st.st_ctimespec.tv_sec).\(st.st_ctimespec.tv_nsec)"
@@ -135,10 +149,10 @@ enum Sampler {
         let exe = plist?["CFBundleExecutable"] as? String
         let st = stamp(bundlePath, exe: exe)
         let id = plist?["CFBundleIdentifier"] as? String
-        let team = teamID(bundlePath)
+        let (isSigned, team) = signature(bundlePath)
         lock.lock()
         if bundleCache.count > 2000 { bundleCache.removeAll() }
-        bundleCache[bundlePath] = (st, exe, id, team)
+        bundleCache[bundlePath] = (st, exe, id, team, isSigned)
         lock.unlock()
         return (id, team)
     }
@@ -149,6 +163,18 @@ enum Sampler {
         lock.unlock()
         guard let c, c.stamp == stamp(bundlePath, exe: c.exe) else { return nil }
         return (c.id, c.team)
+    }
+
+    /// Signature verdict from the cache; nil until checked.
+    static func signed(_ path: String) -> Bool? {
+        lock.lock(); defer { lock.unlock() }
+        return bundleCache[path]?.signed
+    }
+
+    /// CFBundleExecutable of an already-checked bundle.
+    static func mainExecutable(_ bundlePath: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return bundleCache[bundlePath]?.exe.map { bundlePath + "/Contents/MacOS/" + $0 }
     }
 
     private static let verifyQueue = DispatchQueue(label: "warden.codesign", qos: .utility)
@@ -171,15 +197,16 @@ enum Sampler {
         return (id, nil, true)
     }
 
-    private static func teamID(_ path: String) -> String? {
+    /// Valid Apple-issued signature, and its team. Apple's own apps (Safari…) are signed with no team.
+    private static func signature(_ path: String) -> (Bool, String?) {
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess, let code,
               SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSDoNotValidateResources), appleIssued) == errSecSuccess
-        else { return nil }
+        else { return (false, nil) }
         var info: CFDictionary?
         guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let d = info as? [String: Any] else { return nil }
-        return d[kSecCodeInfoTeamIdentifier as String] as? String
+              let d = info as? [String: Any] else { return (true, nil) }
+        return (true, d[kSecCodeInfoTeamIdentifier as String] as? String)
     }
 
     // MARK: stats

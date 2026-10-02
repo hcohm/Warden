@@ -25,7 +25,7 @@ check(pa.ppid == 1, "orphan reparented to launchd")
 // whitelist / candidates
 let wl = WLEntry.defaults()
 print("defaults:", wl.map { "\($0.label)[\($0.detail)]" })
-for p in Sampler.processes() { if let b = p.bundlePath { _ = Sampler.bundleInfo(b) } }  // finish signature checks
+for p in Sampler.processes() where p.verifying { _ = Sampler.bundleInfo(p.bundlePath ?? p.path) }  // finish signature checks
 let procs = Sampler.processes()
 check(!procs.contains { $0.verifying }, "no process left verifying after checks")
 let cands = Killer.candidates(procs, whitelist: wl, guiApps: Killer.guiAppPids())
@@ -143,6 +143,62 @@ let scanned = (sizes.last ?? 0) - (sizes.first ?? 0)
 check(scanned > 0 && (touch?.bytes ?? 0) >= scanned, "growth attributed to writer ≥ growth seen by scans (\(Fmt.bytes(scanned))): \(Fmt.bytes(touch?.bytes ?? 0))")
 check(snap.folders.contains { $0.folder == (target as NSString).deletingLastPathComponent && $0.pids.contains(wpid) }, "folder activity lists writer")
 Darwin.kill(wpid, SIGKILL)
+
+// purge selection by regex
+let rc = [Killer.Candidate(proc: Proc(pid: 1, ppid: 1, uid: 501, cpu: 0, rss: 0, start: "a", path: "/Applications/Foo.app/Contents/MacOS/Foo Helper"), group: .background),
+          Killer.Candidate(proc: Proc(pid: 2, ppid: 1, uid: 501, cpu: 0, rss: 0, start: "b", path: "/opt/bin/updaterd"), group: .background)]
+check(Killer.select("helper|UPDATE", in: rc)?.count == 2, "regex selects case-insensitively by name/path")
+check(Killer.select("^/opt/", in: rc) == [rc[1].id], "regex anchors work against the path line")
+check(Killer.select("([", in: rc) == nil, "invalid regex rejected")
+
+// flags
+let fdir = String(cString: realpath(dir, nil))
+let fs1 = spawnOrphan(fdir + "/fake/sleeper")
+_ = Sampler.bundleInfo(fdir + "/fake/sleeper")  // finish the signature check
+var fp = Sampler.processes().first { $0.pid == fs1 }!
+var ctx = Flags.Context(procs: [fp], net: [:], grants: nil)
+var labels = Flags.of(fp, ctx).map(\.label)
+check(labels.contains("Runs from temp folder"), "flag: runs from temp folder")
+check(labels.contains("Unsigned"), "flag: ad-hoc binary is unsigned")
+let gone = fdir + "/fake/gone"
+_ = Sampler.run("/bin/cp", [fdir + "/fake/sleeper", gone])
+let fs2 = spawnOrphan(gone)
+unlink(gone)
+fp = Sampler.processes().first { $0.pid == fs2 }!
+check(Flags.of(fp, ctx).contains { $0.label == "Binary deleted" }, "flag: executable deleted while running")
+// helper of an app that isn't running
+let fake = fdir + "/Fakeapp.app"
+try! FileManager.default.createDirectory(atPath: fake + "/Contents/MacOS", withIntermediateDirectories: true)
+_ = Sampler.run("/bin/cp", [fdir + "/fake/sleeper", fake + "/Contents/MacOS/Fakeapp"])
+_ = Sampler.run("/bin/cp", [fdir + "/fake/sleeper", fake + "/Contents/MacOS/FakeHelper"])
+NSDictionary(dictionary: ["CFBundleIdentifier": "com.example.fakeapp", "CFBundleExecutable": "Fakeapp"]).write(toFile: fake + "/Contents/Info.plist", atomically: true)
+_ = Sampler.bundleInfo(fake)
+let fs3 = spawnOrphan(fake + "/Contents/MacOS/FakeHelper")
+let all = Sampler.processes()
+fp = all.first { $0.pid == fs3 }!
+ctx = Flags.Context(procs: all, net: [:], grants: nil)
+check(Flags.of(fp, ctx).contains { $0.label == "Fakeapp isn't open" }, "flag: helper of a closed app")
+let fs4 = spawnOrphan(fake + "/Contents/MacOS/Fakeapp")
+let all2 = Sampler.processes()
+check(!Flags.of(fp, Flags.Context(procs: all2, net: [:], grants: nil)).contains { $0.label == "Fakeapp isn't open" }, "no leftover flag once the app runs")
+for pid in [fs1, fs2, fs3, fs4] { Darwin.kill(pid, SIGKILL) }
+// idle, root
+let old = DateFormatter(); old.locale = Locale(identifier: "en_US_POSIX"); old.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+let idle = Proc(pid: 7, ppid: 1, uid: 0, cpu: 0, rss: 0, start: old.string(from: Date().addingTimeInterval(-5 * 86400)), path: "/opt/idled")
+let il = Flags.of(idle, Flags.Context(procs: [], net: [:], grants: nil)).map(\.label)
+check(il.contains { $0.hasPrefix("Idle since") } && il.contains("Root"), "flags: idle for days, root")
+// listeners
+let ls = NetSampler.parse("srv.88,0,0,\ntcp4 *:8080<->*:*,,,\ntcp4 127.0.0.1:9000<->*:*,,,\ntcp6 *.8080<->*.*,,,\nudp4 *:5353<->*:*,,,\n")
+check(ls[88]?.listens == ["8080"], "listeners: network-facing TCP only, loopback and UDP ignored")
+// TCC grants from a database with the real schema's relevant columns
+let tdb = fdir + "/tcc.db"
+_ = Sampler.run("/usr/bin/sqlite3", [tdb, "CREATE TABLE access(service TEXT, client TEXT, client_type INT, auth_value INT); INSERT INTO access VALUES('kTCCServiceAccessibility','com.example.fakeapp',0,2),('kTCCServiceCamera','/opt/x',1,0),('kTCCServiceSystemPolicyAllFiles','/opt/y',1,2);"])
+let g = TCC.grants([tdb])
+check(g?["com.example.fakeapp"] == ["Accessibility"] && g?["/opt/y"] == ["Full Disk Access"] && g?["/opt/x"] == nil, "TCC: allowed grants read, denied ignored")
+check(TCC.grants([fdir + "/missing.db"]) == nil, "TCC: unreadable database -> nil (needs Full Disk Access)")
+var tp = Proc(pid: 9, ppid: 1, uid: 501, cpu: 0, rss: 0, start: "", path: fake + "/Contents/MacOS/FakeHelper")
+tp.bundleID = "com.example.fakeapp"
+check(Flags.of(tp, Flags.Context(procs: [], net: [:], grants: g)).contains { $0.label == "Accessibility" && $0.kind == .permission }, "flag: privacy grant shown")
 
 print(fails == 0 ? "ALL PASS" : "\(fails) FAILED")
 exit(fails == 0 ? 0 : 1)

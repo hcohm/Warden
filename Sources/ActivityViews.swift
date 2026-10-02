@@ -177,6 +177,19 @@ struct ProcessDetailView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
+                    if let p {
+                        let fl = Flags.of(p, Flags.Context(procs: mon.procs, net: mon.net, grants: mon.tccGrants))
+                        if !fl.isEmpty {
+                            SectionTitle(text: "Flags")
+                            ForEach(fl) { f in
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(f.label).bold().foregroundStyle(FlagChips.color(f.kind))
+                                    Text(f.why).foregroundStyle(.secondary)
+                                }
+                                .font(.caption)
+                            }
+                        }
+                    }
                     SectionTitle(text: "Open for writing now")
                     let open = mon.openWrites[pid] ?? []
                     if p.map({ $0.uid != getuid() }) ?? false {

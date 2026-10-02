@@ -60,6 +60,8 @@ final class Monitor: ObservableObject {
     // file activity
     @Published var openWrites: [Int32: [OpenFile]] = [:]
     @Published var files = FileSnapshot()
+    /// Privacy grants by TCC client; nil = TCC databases unreadable (no Full Disk Access).
+    @Published var tccGrants: [String: Set<String>]?
     /// Process shown in the detail view, if any.
     @Published var selectedPid: Int32?
 
@@ -199,6 +201,7 @@ final class Monitor: ObservableObject {
             self.lastNet = net.mapValues { ($0.name, $0.bytesIn, $0.bytesOut) }
 
             let cpu = list.reduce(0) { $0 + $1.cpu } / Double(ProcessInfo.processInfo.activeProcessorCount)
+            let grants = self.tickCount % 30 == 1 ? Optional(TCC.grants()) : nil  // ~1 min
             let mem = Sampler.memoryUsed()
             let disk = sampleDisk ? Sampler.disk() : nil
             DispatchQueue.main.async {
@@ -208,6 +211,7 @@ final class Monitor: ObservableObject {
                 self.memUsed = mem
                 self.writeRateTotal = rateTotal
                 self.openWrites = open
+                if let grants { self.tccGrants = grants }
                 self.net = net
                 self.netRateIn = netIn
                 self.netRateOut = netOut

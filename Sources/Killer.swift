@@ -23,8 +23,16 @@ enum Killer {
         case background = "Background (yours)"
         case privileged = "Root / other users — asks for password"
         case unidentified = "Unidentified path"
-        /// Root and unidentified processes are opt-in per row.
-        var defaultOn: Bool { self == .apps || self == .background }
+    }
+
+    /// Keys of candidates whose name or path matches `pattern` (case-insensitive; ^ and $ work
+    /// per line, so "^/Applications/" anchors to the path); nil if the pattern is invalid.
+    static func select(_ pattern: String, in cands: [Candidate]) -> Set<String>? {
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .anchorsMatchLines]) else { return nil }
+        return Set(cands.filter { c in
+            let s = c.proc.displayName + "\n" + c.proc.path
+            return re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+        }.map(\.id))
     }
 
     struct Candidate: Identifiable {

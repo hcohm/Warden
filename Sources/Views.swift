@@ -322,20 +322,34 @@ struct SizeBar: View {
 
 // MARK: Purge
 
+enum PurgeSort: String, CaseIterable { case flags = "Flags", name = "Name", memory = "Memory", cpu = "CPU", age = "Oldest" }
+
 struct PurgeView: View {
     @EnvironmentObject var mon: Monitor
-    @State private var flipped: Set<String> = []   // proc keys toggled away from their group default
+    @State private var checked: Set<String> = []   // proc keys; nothing is ticked until you tick it
     @State private var force = false
+    @State private var pattern = ""
+    @State private var patternError = false
+    @AppStorage("purgeSort") private var sort: PurgeSort = .flags
+    @AppStorage("flaggedOnly") private var flaggedOnly = false
     @State private var newEntry = ""
     @State private var addError: String?
     @State private var pending: [Proc] = []        // frozen when the dialog opens; exactly this gets killed
 
-    var cands: [Killer.Candidate] { Killer.candidates(mon.procs, whitelist: mon.whitelist, guiApps: Killer.guiAppPids()) }
-    func isOn(_ c: Killer.Candidate) -> Bool { c.group.defaultOn != flipped.contains(c.id) }
-
     var body: some View {
-        let all = cands
-        let selected = all.filter(isOn).map(\.proc)
+        let ctx = Flags.Context(procs: mon.procs, net: mon.net, grants: mon.tccGrants)
+        let flags = Dictionary(Killer.candidates(mon.procs, whitelist: mon.whitelist, guiApps: Killer.guiAppPids())
+            .map { ($0, Flags.of($0.proc, ctx)) }.map { ($0.0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let visible = flags.values.filter { !flaggedOnly || !$0.1.isEmpty }.sorted { a, b in
+            switch sort {
+            case .flags: return (a.1.count, a.0.proc.rss) > (b.1.count, b.0.proc.rss)
+            case .name: return a.0.proc.displayName.localizedCaseInsensitiveCompare(b.0.proc.displayName) == .orderedAscending
+            case .memory: return a.0.proc.rss > b.0.proc.rss
+            case .cpu: return a.0.proc.cpu > b.0.proc.cpu
+            case .age: return (Flags.started(a.0.proc) ?? .distantFuture) < (Flags.started(b.0.proc) ?? .distantFuture)
+            }
+        }
+        let selected = flags.values.filter { checked.contains($0.0.id) }.map(\.0.proc)
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Toggle("Force (no save prompts)", isOn: $force).toggleStyle(.checkbox)
@@ -350,32 +364,56 @@ struct PurgeView: View {
                 Button(force ? "Force Kill" : "Kill", role: .destructive) {
                     Killer.kill(pending, force: force)
                     pending = []
-                    flipped = []
+                    checked = []
                 }
             } message: {
                 let root = pending.filter { $0.uid != getuid() }.count
                 Text(pending.map(\.displayName).joined(separator: ", ")
                      + (root > 0 ? "\n\n\(root) run as root — you'll be asked for your password." : ""))
             }
+            HStack(spacing: 6) {
+                Button("All") { checked.formUnion(visible.map(\.0.id)) }
+                Button("None") { checked = [] }
+                Button("Flagged") { checked.formUnion(visible.filter { !$0.1.isEmpty }.map(\.0.id)) }
+                TextField("Select by regex, e.g. helper|update", text: $pattern)
+                    .textFieldStyle(.roundedBorder)
+                    .foregroundStyle(patternError ? .red : .primary)
+                    .onSubmit { selectPattern(visible.map(\.0)) }
+                Button("Select") { selectPattern(visible.map(\.0)) }.disabled(pattern.isEmpty)
+            }
+            .controlSize(.small)
+            HStack {
+                Picker("Sort", selection: $sort) { ForEach(PurgeSort.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
+                    .frame(width: 150)
+                Toggle("Flagged only", isOn: $flaggedOnly).toggleStyle(.checkbox)
+                Spacer()
+                if mon.tccGrants == nil {
+                    Text("Permissions need Full Disk Access").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .controlSize(.small)
 
             List {
                 ForEach(Killer.Group.allCases, id: \.self) { g in
-                    let items = all.filter { $0.group == g }
+                    let items = visible.filter { $0.0.group == g }
                     if !items.isEmpty {
-                        Section(g.defaultOn ? g.rawValue : g.rawValue + " (tick to include)") {
-                            ForEach(items) { c in
+                        Section(g.rawValue) {
+                            ForEach(items, id: \.0.id) { c, fl in
                                 HStack {
-                                    Toggle("", isOn: Binding(get: { isOn(c) }, set: { v in
-                                        if v == g.defaultOn { flipped.remove(c.id) } else { flipped.insert(c.id) }
+                                    Toggle("", isOn: Binding(get: { checked.contains(c.id) }, set: { v in
+                                        if v { checked.insert(c.id) } else { checked.remove(c.id) }
                                     }))
                                     .toggleStyle(.checkbox).labelsHidden()
                                     AppIcon(path: c.proc.bundlePath ?? c.proc.path)
                                     Text(c.proc.displayName).lineLimit(1).help(c.proc.path)
+                                    FlagChips(flags: fl)
                                     Spacer()
                                     Text(Fmt.bytes(c.proc.rss)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                                     Button("Whitelist") { mon.whitelist.append(WLEntry.from(c.proc)) }
                                         .controlSize(.small)
                                 }
+                                .contentShape(Rectangle())
+                                .onTapGesture(count: 2) { mon.selectedPid = c.proc.pid }
                             }
                         }
                     }
@@ -402,6 +440,12 @@ struct PurgeView: View {
         }
     }
 
+    func selectPattern(_ cands: [Killer.Candidate]) {
+        guard let keys = Killer.select(pattern, in: cands) else { patternError = true; return }
+        patternError = false
+        checked.formUnion(keys)
+    }
+
     func append(_ e: WLEntry) {
         if !mon.whitelist.contains(e) { mon.whitelist.append(e) }
     }
@@ -424,6 +468,24 @@ struct PurgeView: View {
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK else { return }
         for url in panel.urls { if let e = WLEntry.app(at: url.path) { append(e) } }
+    }
+}
+
+/// Up to three flag chips, coloured by kind, explanation on hover.
+struct FlagChips: View {
+    let flags: [Flag]
+    static func color(_ k: Flag.Kind) -> Color { k == .suspicious ? .red : k == .bloat ? .orange : .purple }
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(flags.sorted { $0.kind.rawValue < $1.kind.rawValue }.prefix(3)) { f in
+                Text(f.label).font(.caption2).lineLimit(1)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Self.color(f.kind).opacity(0.18)))
+                    .foregroundStyle(Self.color(f.kind))
+                    .help(f.why)
+            }
+            if flags.count > 3 { Text("+\(flags.count - 3)").font(.caption2).foregroundStyle(.secondary) }
+        }
     }
 }
 

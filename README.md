@@ -44,7 +44,27 @@ Kills everything except:
 - Apple system binaries (`/System`, `/usr` except `/usr/local`, `/bin`, `/sbin`, …) and system extensions. launchd restarts these immediately, and killing some of them ends your session.
 - Anything on your whitelist, **and anything started by something on your whitelist**. Whitelisting your terminal also keeps the shells and tools running inside it alive.
 
-Candidates are grouped into **Apps**, **Background** processes and **Root / other users**. Root processes, and processes whose path can't be read, start unticked. Killing root processes asks for your password through the standard macOS prompt.
+Candidates are grouped into **Apps**, **Background** processes and **Root / other users**. **Nothing is ticked until you tick it.** To pick quickly:
+- **All / None / Flagged** buttons, plus **select by regex** against the name and path (case-insensitive; `^/Applications/` anchors to the path).
+- **Sort** by flags, name, memory, CPU or age, and show **Flagged only**.
+- Double-click a row for its details.
+
+Killing root processes asks for your password through the standard macOS prompt.
+
+### Flags
+Warden marks processes worth a second look. Hover a flag for the reason, or open the process for the full explanation. They're heuristics, not verdicts.
+
+| Kind | Flag | Meaning |
+|---|---|---|
+| Suspicious (red) | Unsigned | No valid signature from an Apple-issued certificate. Normal for your own builds and Homebrew/pip tools. |
+| | Binary deleted | Still running, but its executable is gone from disk. |
+| | Runs from temp / Downloads / cache / hidden folder | Installed apps rarely run from there; malware and leftover installers often do. |
+| Bloat (orange) | *App* isn't open | A helper that keeps running after its app was closed. |
+| | Updater | A background updater. |
+| | Idle since *date* | Running for 3+ days without using CPU, disk or network. |
+| Permissions (purple) | Root | Full administrator rights. |
+| | Listens on :*port* | Accepts connections from other machines. Loopback-only ports aren't flagged. |
+| | Full Disk Access, Accessibility, Screen Recording, Input Monitoring, Camera, Microphone, … | Granted in Privacy & Security. Reading these needs Warden to have **Full Disk Access**. |
 
 ### Alerts
 You get a macOS notification, plus an entry in the Alerts tab and in `~/Library/Logs/Warden.log`, when:
@@ -100,7 +120,7 @@ See what a purge would kill without killing anything:
 ~/Applications/Warden.app/Contents/MacOS/Warden --dump
 ```
 
-`KILL` rows are ticked by default in Purge. `opt-in` rows (root or unidentified) are not.
+Each line shows the group, pid, path and any flags.
 
 ---
 

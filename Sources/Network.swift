@@ -17,6 +17,7 @@ struct NetProc {
     let bytesIn: UInt64      // cumulative, as reported by nettop
     let bytesOut: UInt64
     var conns: [NetConn] = []
+    var listens: [String] = []   // TCP ports accepting connections from other machines (not loopback)
     var rateIn: Double = 0
     var rateOut: Double = 0
 }
@@ -56,7 +57,14 @@ enum NetSampler {
                 guard let pid = current, let arrow = head.range(of: "<->") else { continue }
                 let proto = String(head[..<sp])
                 let local = String(head[head.index(after: sp)..<arrow.lowerBound])
-                guard let (ip, port) = hostPort(head[arrow.upperBound...], v6: proto.hasSuffix("6")), ip != "*" else { continue }
+                guard let (ip, port) = hostPort(head[arrow.upperBound...], v6: proto.hasSuffix("6")) else { continue }
+                if ip == "*" {  // unconnected socket; a TCP one is a listener
+                    if proto.hasPrefix("tcp"), let (lip, lport) = hostPort(Substring(local), v6: proto.hasSuffix("6")),
+                       lip != "127.0.0.1", lip != "::1", res[pid]?.listens.contains(lport) == false {
+                        res[pid]?.listens.append(lport)
+                    }
+                    continue
+                }
                 res[pid]?.conns.append(NetConn(proto: proto, local: local, remoteIP: ip, remotePort: port, bytesIn: bin, bytesOut: bout))
             } else {
                 guard let dot = head.lastIndex(of: "."), let pid = Int32(head[head.index(after: dot)...]) else { current = nil; continue }
